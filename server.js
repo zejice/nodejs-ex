@@ -1,12 +1,15 @@
 //  OpenShift sample Node application
 var express = require('express'),
     app     = express(),
-    morgan  = require('morgan');
+    bunyan  = require('bunyan),
+    ebl     = require('express-bunyan-logger');
+
+var log = bunyan.createLogger({name: "nodejs-ex"});
     
 Object.assign=require('object-assign')
 
 app.engine('html', require('ejs').renderFile);
-app.use(morgan('combined'))
+app.use(ebl())
 
 var port = process.env.PORT || process.env.OPENSHIFT_NODEJS_PORT || 8080,
     ip   = process.env.IP   || process.env.OPENSHIFT_NODEJS_IP || '0.0.0.0',
@@ -65,11 +68,12 @@ var initDb = function(callback) {
     }
 
     db = conn;
+    db.collection('counts').createIndex('host', {background:true, w:1});
     dbDetails.databaseName = db.databaseName;
     dbDetails.url = mongoURLLabel;
     dbDetails.type = 'MongoDB';
 
-    console.log('Connected to MongoDB at: %s', mongoURL);
+    log.info('Connected to MongoDB at: %s', mongoURL);
   });
 };
 
@@ -82,12 +86,17 @@ app.get('/', function (req, res) {
   if (db) {
     var col = db.collection('counts');
     // Create a document with request IP and current time of request
-    col.insert({ip: req.ip, date: Date.now()});
+    col.insert({host: os.hostname(), ip: req.ip, date: Date.now()});
     col.count(function(err, count){
       if (err) {
-        console.log('Error running count. Message:\n'+err);
+        log.info('Error running count. Message:\n'+err);
       }
-      res.render('index.html', { pageCountMessage : count, dbInfo: dbDetails });
+      //res.render('index.html', { pageCountMessage : count, dbInfo: dbDetails });
+      gcount = count; // total line count
+    });
+    // request from specific host to demonstrate what happens when scaling or changing pod
+    col.count({host: os.hostname()}, function(err, count){
+      res.render('index.html', { pageCountMessage : gcount, localCountMessage: count, dbInfo: dbDetails, host: os.hostname() });
     });
   } else {
     res.render('index.html', { pageCountMessage : null});
@@ -109,17 +118,33 @@ app.get('/pagecount', function (req, res) {
   }
 });
 
+app.get('/dropdb', function (req, res) {
+  if (db) {
+    db.collection('counts').drop(function(err, reply ){
+      db.collection('counts').createIndex('host', {background:true, w:1});
+      res.send('{ Drop result: ' + reply + '}');
+    });
+  } else {
+    res.send('{ Nothing to drop: -1 }');
+  }
+});
+
+// specific health endpoint to not increment pagecount with kube healthcheck
+app.get('/health', function (req, res) {
+    res.send('I am healthy');
+});
+
 // error handling
 app.use(function(err, req, res, next){
-  console.error(err.stack);
+  log.error(err.stack);
   res.status(500).send('Something bad happened!');
 });
 
 initDb(function(err){
-  console.log('Error connecting to Mongo. Message:\n'+err);
+  log.info('Error connecting to Mongo. Message:\n'+err);
 });
 
 app.listen(port, ip);
-console.log('Server running on http://%s:%s', ip, port);
+log.info('Server running on http://%s:%s', ip, port);
 
 module.exports = app ;
